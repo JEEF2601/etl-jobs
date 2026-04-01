@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etl-jobs"
+version = "0.1.0"
+description = "Spark ETL jobs compartidos entre Dagster y el cluster Spark standalone"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pyspark",
+  "influxdb",
+  "requests",
+  "PyYAML",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["etl_jobs*"]
