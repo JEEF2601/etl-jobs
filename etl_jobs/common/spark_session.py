@@ -8,12 +8,15 @@ from pyspark.sql import SparkSession
 def build_spark_session(app_name: str) -> SparkSession:
     """Crea una SparkSession con soporte para S3A/R2, cluster remoto y paquetes configurables via env vars."""
     spark_master_url = os.getenv("SPARK_MASTER_URL", "").strip()
+    spark_jars = os.getenv("SPARK_JARS", "").strip()
     spark_packages = os.getenv("SPARK_PACKAGES", "").strip()
 
     builder = SparkSession.builder.appName(app_name)
     if spark_master_url:
         builder = builder.master(spark_master_url)
-    if spark_packages:
+    if spark_jars:
+        builder = builder.config("spark.jars", spark_jars)
+    elif spark_packages:
         builder = builder.config("spark.jars.packages", spark_packages)
 
     r2_access_key = os.getenv("R2_ACCESS_KEY_ID", "").strip()

@@ -59,16 +59,25 @@ def overwrite_partitioned_dataset(
         f"{partition_column} partition(s)."
     )
 
-    for row in partition_rows:
-        partition_value = row[partition_column]
+    partition_values = [row[partition_column] for row in partition_rows]
+    for partition_value in partition_values:
         partition_path = f"{target_path.rstrip('/')}/{partition_column}={partition_value}"
         delete_path(spark, partition_path)
+
+    if len(partition_values) == 1:
+        partition_value = partition_values[0]
+        partition_path = f"{target_path.rstrip('/')}/{partition_column}={partition_value}"
         print(f"Writing {label} partition {partition_column}={partition_value}.")
-        (
-            df_to_write.where(F.col(partition_column) == F.lit(partition_value))
-            .drop(partition_column)
-            .coalesce(1)
-            .write.mode("overwrite")
-            .parquet(partition_path)
+        df_to_write.drop(partition_column).write.mode("overwrite").parquet(partition_path)
+    else:
+        print(
+            f"Writing {label} dataset in a single pass across {len(partition_values)} partitions."
         )
-        cleanup_spark_staging_dirs(spark, target_path)
+        (
+            df_to_write.repartition(len(partition_values), partition_column)
+            .write.mode("append")
+            .partitionBy(partition_column)
+            .parquet(target_path)
+        )
+
+    cleanup_spark_staging_dirs(spark, target_path)
