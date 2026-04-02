@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import requests
@@ -8,6 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, LongType, StringType, StructField, StructType
 
+from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
 from etl_jobs.common.utils import get_env
 
@@ -128,34 +128,6 @@ def _target_paths() -> tuple[str, str]:
     return f"{base_path}bronze/", f"{base_path}silver/"
 
 
-def _cleanup_spark_staging_dirs(spark: SparkSession, target_path: str) -> None:
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    path = spark._jvm.org.apache.hadoop.fs.Path(target_path)
-    fs = path.getFileSystem(hadoop_conf)
-
-    if not fs.exists(path):
-        return
-
-    for status in fs.listStatus(path):
-        item_path = status.getPath()
-        if item_path.getName().startswith(".spark-staging-"):
-            fs.delete(item_path, True)
-            print(f"Deleted Spark staging directory: {item_path.toString()}")
-
-
-def _write_partitioned_parquet(spark: SparkSession, df, target_path: str, label: str) -> None:
-    _cleanup_spark_staging_dirs(spark, target_path)
-    print(f"Refreshing {label} data in {target_path} for the loaded date partitions.")
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    (
-        df.write.mode("overwrite")
-        .option("partitionOverwriteMode", "dynamic")
-        .partitionBy("fecha")
-        .parquet(target_path)
-    )
-    _cleanup_spark_staging_dirs(spark, target_path)
-
-
 def main() -> None:
     spark = None
     try:
@@ -172,8 +144,8 @@ def main() -> None:
             return
 
         bronze_path, silver_path = _target_paths()
-        _write_partitioned_parquet(spark, df_raw, bronze_path, "bronze")
-        _write_partitioned_parquet(spark, df_silver, silver_path, "silver")
+        overwrite_partitioned_dataset(spark, df_raw, bronze_path, "fecha", "bronze")
+        overwrite_partitioned_dataset(spark, df_silver, silver_path, "fecha", "silver")
         print("ETL completed successfully.")
     finally:
         if spark is not None:

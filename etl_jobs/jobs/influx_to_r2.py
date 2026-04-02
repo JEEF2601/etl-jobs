@@ -9,12 +9,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType
 
+from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
 from etl_jobs.common.utils import get_env
 
 
 def _default_influx_query() -> str:
-    lookback = os.getenv("INFLUXDB_LOOKBACK", "30d").strip()
+    lookback = os.getenv("INFLUXDB_LOOKBACK", "5h").strip()
     if not re.fullmatch(r"\d+(ms|s|m|h|d|w)", lookback):
         raise ValueError(
             "Invalid INFLUXDB_LOOKBACK value. Use formats like '1h', '12h', '7d', or '30d'."
@@ -119,21 +120,6 @@ def _target_path() -> str:
     return f"s3a://{bucket}/"
 
 
-def _cleanup_spark_staging_dirs(spark: SparkSession, target_path: str) -> None:
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    path = spark._jvm.org.apache.hadoop.fs.Path(target_path)
-    fs = path.getFileSystem(hadoop_conf)
-
-    if not fs.exists(path):
-        return
-
-    for status in fs.listStatus(path):
-        item_path = status.getPath()
-        if item_path.getName().startswith(".spark-staging-"):
-            fs.delete(item_path, True)
-            print(f"Deleted Spark staging directory: {item_path.toString()}")
-
-
 def main() -> None:
     spark = None
     try:
@@ -150,16 +136,7 @@ def main() -> None:
             return
 
         target_path = _target_path()
-        _cleanup_spark_staging_dirs(spark, target_path)
-        print(f"Refreshing transformed data in {target_path} for the loaded date partitions.")
-        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-        (
-            df_clean.write.mode("overwrite")
-            .option("partitionOverwriteMode", "dynamic")
-            .partitionBy("date")
-            .parquet(target_path)
-        )
-        _cleanup_spark_staging_dirs(spark, target_path)
+        overwrite_partitioned_dataset(spark, df_clean, target_path, "date", "transformed")
         print("ETL completed successfully.")
     finally:
         if spark is not None:
