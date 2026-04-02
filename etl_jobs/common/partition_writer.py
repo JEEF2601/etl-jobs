@@ -4,6 +4,7 @@ from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from py4j.protocol import Py4JJavaError
 
 
 def _get_filesystem(spark: SparkSession, path_str: str) -> tuple[Any, Any]:
@@ -13,13 +14,31 @@ def _get_filesystem(spark: SparkSession, path_str: str) -> tuple[Any, Any]:
     return fs, path
 
 
+def _path_exists(fs: Any, path: Any) -> bool:
+    try:
+        return bool(fs.exists(path))
+    except Py4JJavaError as exc:
+        message = str(exc.java_exception)
+        if "AWSBadRequestException" in message or "FileNotFoundException" in message:
+            return False
+        raise
+
+
 def cleanup_spark_staging_dirs(spark: SparkSession, target_path: str) -> None:
     fs, path = _get_filesystem(spark, target_path)
 
-    if not fs.exists(path):
+    if not _path_exists(fs, path):
         return
 
-    for status in fs.listStatus(path):
+    try:
+        statuses = fs.listStatus(path)
+    except Py4JJavaError as exc:
+        message = str(exc.java_exception)
+        if "AWSBadRequestException" in message or "FileNotFoundException" in message:
+            return
+        raise
+
+    for status in statuses:
         item_path = status.getPath()
         if item_path.getName().startswith(".spark-staging-"):
             fs.delete(item_path, True)
@@ -29,7 +48,7 @@ def cleanup_spark_staging_dirs(spark: SparkSession, target_path: str) -> None:
 def delete_path(spark: SparkSession, target_path: str) -> None:
     fs, path = _get_filesystem(spark, target_path)
 
-    if fs.exists(path):
+    if _path_exists(fs, path):
         fs.delete(path, True)
         print(f"Deleted existing partition path: {path.toString()}")
 
