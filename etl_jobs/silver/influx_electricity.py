@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, StringType
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
 from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
@@ -29,6 +29,15 @@ _DOMAIN_COLUMNS = [
     "latitude",
     "longitude",
 ]
+
+# Schema explícito para la lectura Bronze: todas las columnas como StringType.
+# Esto evita que Spark intente inferir/merge schemas entre particiones antiguas
+# (que tienen columnas como DOUBLE) y nuevas (que tienen todo como STRING).
+# Al proveer un schema fijo, el lector Parquet proyecta y convierte los bytes
+# sin ejecutar SchemaMergeUtils → elimina CANNOT_MERGE_SCHEMAS.
+_BRONZE_READ_SCHEMA = StructType(
+    [StructField(col, StringType(), True) for col in _DOMAIN_COLUMNS + ["date"]]
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -83,9 +92,12 @@ def _silver_path() -> str:
 
 def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: date, end_dt: date):
     """Lee Bronze, filtra rango de fechas y clases de dispositivo, y aplica el schema Silver."""
+    # Usamos schema explícito (solo columnas necesarias, todas StringType).
+    # Evita mergeSchema y el error CANNOT_MERGE_INCOMPATIBLE_DATA_TYPE entre
+    # particiones con DOUBLE (antiguas) y STRING (nuevas).
     df_bronze = (
         spark.read
-        .option("mergeSchema", "true")
+        .schema(_BRONZE_READ_SCHEMA)
         .parquet(bronze_path)
         .filter(
             (F.col("date") >= F.lit(str(start_dt)))
@@ -104,12 +116,12 @@ def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: dat
     df_silver = df_filtered.select(*select_cols)
 
     # Conversiones de tipo para uso analítico.
-    # Bronze almacena todo como StringType (BINARY en Parquet). Forzamos el cast
-    # intermedio a StringType para que Spark no empuje el cast a DoubleType
-    # directamente al lector Parquet (ClassCastException: [B -> Double en Spark 4).
+    # El schema de lectura ya es todo StringType, por lo que el cast intermedio
+    # a String es innecesario: podemos ir directo a DoubleType sin riesgo de
+    # pushdown al lector Parquet.
     if "value" in df_silver.columns:
         df_silver = df_silver.withColumn(
-            "value", F.col("value").cast(StringType()).cast(DoubleType())
+            "value", F.col("value").cast(DoubleType())
         )
 
     if "timestamp" in df_silver.columns:
