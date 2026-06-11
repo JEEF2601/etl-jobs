@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+from pyspark.sql.types import DateType, DoubleType, StringType, StructField, StructType, TimestampType
 
 from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
@@ -30,13 +30,16 @@ _DOMAIN_COLUMNS = [
     "longitude",
 ]
 
-# Schema explícito para la lectura Bronze: todas las columnas como StringType.
-# Esto evita que Spark intente inferir/merge schemas entre particiones antiguas
-# (que tienen columnas como DOUBLE) y nuevas (que tienen todo como STRING).
-# Al proveer un schema fijo, el lector Parquet proyecta y convierte los bytes
-# sin ejecutar SchemaMergeUtils → elimina CANNOT_MERGE_SCHEMAS.
+# Schema explícito para la lectura Bronze.
+# - timestamp y date se leen con sus tipos nativos Parquet (TIMESTAMP / DATE)
+#   para evitar CAST_INVALID_INPUT al leer bytes binarios como StringType.
+# - El resto de columnas payload se declaran como StringType, lo que hace que
+#   el reader Parquet ignore los tipos físicos almacenados (DOUBLE o BINARY/STRING
+#   según la partición) y los convierta a texto, evitando CANNOT_MERGE_SCHEMAS.
 _BRONZE_READ_SCHEMA = StructType(
-    [StructField(col, StringType(), True) for col in _DOMAIN_COLUMNS + ["date"]]
+    [StructField("timestamp", TimestampType(), True)]
+    + [StructField(col, StringType(), True) for col in _DOMAIN_COLUMNS if col != "timestamp"]
+    + [StructField("date", DateType(), True)]
 )
 
 
@@ -115,20 +118,12 @@ def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: dat
 
     df_silver = df_filtered.select(*select_cols)
 
-    # Conversiones de tipo para uso analítico.
-    # El schema de lectura ya es todo StringType, por lo que el cast intermedio
-    # a String es innecesario: podemos ir directo a DoubleType sin riesgo de
-    # pushdown al lector Parquet.
+    # timestamp y date ya llegan con su tipo correcto desde el schema de lectura;
+    # solo necesitamos castear value a DoubleType para uso analítico.
     if "value" in df_silver.columns:
         df_silver = df_silver.withColumn(
             "value", F.col("value").cast(DoubleType())
         )
-
-    if "timestamp" in df_silver.columns:
-        df_silver = df_silver.withColumn("timestamp", F.to_timestamp("timestamp"))
-
-    # Garantizar tipo date en la columna de partición
-    df_silver = df_silver.withColumn("date", F.to_date(F.col("date")))
 
     return df_silver
 
