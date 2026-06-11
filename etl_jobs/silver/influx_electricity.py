@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType
+from pyspark.sql.types import DoubleType, StringType
 
 from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
@@ -84,7 +84,9 @@ def _silver_path() -> str:
 def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: date, end_dt: date):
     """Lee Bronze, filtra rango de fechas y clases de dispositivo, y aplica el schema Silver."""
     df_bronze = (
-        spark.read.parquet(bronze_path)
+        spark.read
+        .option("mergeSchema", "true")
+        .parquet(bronze_path)
         .filter(
             (F.col("date") >= F.lit(str(start_dt)))
             & (F.col("date") <= F.lit(str(end_dt)))
@@ -101,9 +103,14 @@ def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: dat
 
     df_silver = df_filtered.select(*select_cols)
 
-    # Conversiones de tipo para uso analítico
+    # Conversiones de tipo para uso analítico.
+    # Bronze almacena todo como StringType (BINARY en Parquet). Forzamos el cast
+    # intermedio a StringType para que Spark no empuje el cast a DoubleType
+    # directamente al lector Parquet (ClassCastException: [B -> Double en Spark 4).
     if "value" in df_silver.columns:
-        df_silver = df_silver.withColumn("value", F.col("value").cast(DoubleType()))
+        df_silver = df_silver.withColumn(
+            "value", F.col("value").cast(StringType()).cast(DoubleType())
+        )
 
     if "timestamp" in df_silver.columns:
         df_silver = df_silver.withColumn("timestamp", F.to_timestamp("timestamp"))
