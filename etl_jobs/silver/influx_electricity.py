@@ -4,9 +4,9 @@ import argparse
 import os
 from datetime import date, timedelta
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DateType, DoubleType, StringType, StructField, StructType, TimestampType
+from pyspark.sql.types import DateType, DoubleType, StringType, TimestampType
 
 from etl_jobs.common.partition_writer import overwrite_partitioned_dataset
 from etl_jobs.common.spark_session import build_spark_session
@@ -29,18 +29,6 @@ _DOMAIN_COLUMNS = [
     "latitude",
     "longitude",
 ]
-
-# Schema explícito para la lectura Bronze.
-# - timestamp y date se leen con sus tipos nativos Parquet (TIMESTAMP / DATE)
-#   para evitar CAST_INVALID_INPUT al leer bytes binarios como StringType.
-# - El resto de columnas payload se declaran como StringType, lo que hace que
-#   el reader Parquet ignore los tipos físicos almacenados (DOUBLE o BINARY/STRING
-#   según la partición) y los convierta a texto, evitando CANNOT_MERGE_SCHEMAS.
-_BRONZE_READ_SCHEMA = StructType(
-    [StructField("timestamp", TimestampType(), True)]
-    + [StructField(col, StringType(), True) for col in _DOMAIN_COLUMNS if col != "timestamp"]
-    + [StructField("date", DateType(), True)]
-)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -93,24 +81,56 @@ def _silver_path() -> str:
     return f"s3a://{bucket}/{prefix}/"
 
 
-def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: date, end_dt: date):
-    """Lee Bronze, filtra rango de fechas y clases de dispositivo, y aplica el schema Silver."""
-    # Usamos schema explícito (solo columnas necesarias, todas StringType).
-    # Evita mergeSchema y el error CANNOT_MERGE_INCOMPATIBLE_DATA_TYPE entre
-    # particiones con DOUBLE (antiguas) y STRING (nuevas).
-    df_bronze = (
-        spark.read
-        .schema(_BRONZE_READ_SCHEMA)
-        .parquet(bronze_path)
-        .filter(
-            (F.col("date") >= F.lit(str(start_dt)))
-            & (F.col("date") <= F.lit(str(end_dt)))
-        )
+def _read_bronze_partition(spark: SparkSession, bronze_path: str, partition_date: date) -> DataFrame | None:
+    """Lee una única partición date=YYYY-MM-DD y normaliza TODOS los tipos a StringType.
+
+    La estrategia partición-por-partición es la única que funciona de forma fiable
+    cuando el Bronze tiene tipos físicos inconsistentes (DOUBLE en particiones
+    antiguas, BINARY/STRING en las nuevas): cada archivo se lee con su propio
+    schema nativo y el cast a String se hace en el plan lógico de Spark, no
+    en el reader Parquet, evitando tanto CANNOT_MERGE_SCHEMAS como
+    CAST_INVALID_INPUT.
+    """
+    path = f"{bronze_path}date={partition_date}/"
+    try:
+        df = spark.read.parquet(path)
+    except Exception:
+        # La partición no existe o está vacía; se omite silenciosamente.
+        return None
+
+    # Castear cada columna a StringType con su tipo físico conocido.
+    # Funciona tanto si el tipo es DOUBLE como BINARY porque el cast ocurre
+    # después de que el reader Parquet decodificó correctamente los bytes.
+    df_str = df.select(
+        [F.col(c).cast(StringType()).alias(c) for c in df.columns]
     )
+    # La columna "date" es una columna de partición: no está en los archivos
+    # Parquet sino en el nombre del directorio. La añadimos explícitamente.
+    return df_str.withColumn("date", F.lit(str(partition_date)).cast(DateType()))
 
-    df_filtered = df_bronze.filter(F.col("device_class_str").isin(DEVICE_CLASSES))
 
-    # Seleccionar solo columnas disponibles del conjunto deseado + date para partición
+def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: date, end_dt: date) -> DataFrame | None:
+    """Lee Bronze día a día, normaliza tipos, filtra y aplica el schema Silver."""
+    dfs: list[DataFrame] = []
+    current = start_dt
+    while current <= end_dt:
+        df_part = _read_bronze_partition(spark, bronze_path, current)
+        if df_part is not None:
+            dfs.append(df_part)
+        current += timedelta(days=1)
+
+    if not dfs:
+        return None
+
+    # Unir todos los días; allowMissingColumns=True maneja columnas que no
+    # existen en todas las particiones (e.g. columnas añadidas con el tiempo).
+    df_all = dfs[0]
+    for df in dfs[1:]:
+        df_all = df_all.unionByName(df, allowMissingColumns=True)
+
+    df_filtered = df_all.filter(F.col("device_class_str").isin(DEVICE_CLASSES))
+
+    # Seleccionar solo las columnas del dominio + date para la partición
     available = set(df_filtered.columns)
     select_cols = [c for c in _DOMAIN_COLUMNS if c in available]
     if "date" not in select_cols:
@@ -118,12 +138,11 @@ def _build_silver_dataframe(spark: SparkSession, bronze_path: str, start_dt: dat
 
     df_silver = df_filtered.select(*select_cols)
 
-    # timestamp y date ya llegan con su tipo correcto desde el schema de lectura;
-    # solo necesitamos castear value a DoubleType para uso analítico.
+    # Conversiones de tipo finales (sobre strings limpios, sin riesgo de pushdown)
     if "value" in df_silver.columns:
-        df_silver = df_silver.withColumn(
-            "value", F.col("value").cast(DoubleType())
-        )
+        df_silver = df_silver.withColumn("value", F.col("value").cast(DoubleType()))
+    if "timestamp" in df_silver.columns:
+        df_silver = df_silver.withColumn("timestamp", F.to_timestamp("timestamp"))
 
     return df_silver
 
@@ -145,6 +164,13 @@ def main() -> None:
 
         print(f"[silver_influx_electricity] Leyendo Bronze: {bronze_path}")
         df_silver = _build_silver_dataframe(spark, bronze_path, start_dt, end_dt)
+
+        if df_silver is None:
+            print(
+                "[silver_influx_electricity] No se encontraron particiones Bronze "
+                "para el período indicado. Saltando escritura."
+            )
+            return
 
         row_count = df_silver.count()
         if row_count == 0:
