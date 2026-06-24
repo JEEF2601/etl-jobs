@@ -139,6 +139,7 @@ def main() -> None:
     try:
         spark = build_spark_session("silver_influx_electricity_etl")
         spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")
+        spark.conf.set("spark.sql.files.ignoreCorruptFiles", "true")
 
         bronze_path = _bronze_path()
         silver_path = _silver_path()
