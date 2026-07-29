@@ -87,16 +87,16 @@ def main() -> None:
             truncate=True,
             create_table_column_types=(
                 'timestamp TIMESTAMP, '
-                "device_class_str TEXT, "
-                "domain TEXT, "
-                "entity_id TEXT, "
-                "friendly_name_str TEXT, "
-                "friendly_name TEXT, "
-                "state_class_str TEXT, "
-                "value DOUBLE PRECISION, "
-                "measurement TEXT, "
-                "latitude TEXT, "
-                "longitude TEXT"
+                "device_class_str STRING, "
+                "domain STRING, "
+                "entity_id STRING, "
+                "friendly_name_str STRING, "
+                "friendly_name STRING, "
+                "state_class_str STRING, "
+                "value DOUBLE, "
+                "measurement STRING, "
+                "latitude STRING, "
+                "longitude STRING"
             ),
         )
 
