@@ -72,7 +72,7 @@ def main() -> None:
         spark = build_spark_session("silver_electricity_to_postgres")
         source_path = _source_path()
         base_env = get_env("BASE_ENV")
-        table = os.getenv("POSTGRES_TABLE", "silver_electricity")
+        table = os.getenv("POSTGRES_TABLE", "public.silver_electricity")
 
         print(f"[silver_electricity_to_postgres] Leyendo dataset: {source_path}")
         df = spark.read.parquet(source_path)
