@@ -86,7 +86,7 @@ def main() -> None:
             mode="overwrite",
             truncate=True,
             create_table_column_types=(
-                '"timestamp" TIMESTAMP, '
+                'timestamp TIMESTAMP, '
                 "device_class_str TEXT, "
                 "domain TEXT, "
                 "entity_id TEXT, "
