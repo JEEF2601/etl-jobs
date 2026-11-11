@@ -4,53 +4,39 @@ from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from py4j.protocol import Py4JJavaError
 
-
-def _get_filesystem(spark: SparkSession, path_str: str) -> tuple[Any, Any]:
-    hadoop_conf = spark._jsc.hadoopConfiguration()
-    path = spark._jvm.org.apache.hadoop.fs.Path(path_str)
-    fs = path.getFileSystem(hadoop_conf)
-    return fs, path
-
-
-def _path_exists(fs: Any, path: Any) -> bool:
-    try:
-        return bool(fs.exists(path))
-    except Py4JJavaError as exc:
-        message = str(exc.java_exception)
-        if "AWSBadRequestException" in message or "FileNotFoundException" in message:
-            return False
-        raise
+from etl_jobs.common.s3_utils import S3FileSystem
 
 
 def cleanup_spark_staging_dirs(spark: SparkSession, target_path: str) -> None:
-    fs, path = _get_filesystem(spark, target_path)
-
-    if not _path_exists(fs, path):
+    """Elimina los directorios temporales .spark-staging-* generados por Spark en R2."""
+    if not target_path.startswith("s3a://"):
+        print(f"Cleanup skipped: {target_path} is not an S3A path.")
         return
 
+    fs = S3FileSystem()
     try:
-        statuses = fs.listStatus(path)
-    except Py4JJavaError as exc:
-        message = str(exc.java_exception)
-        if "AWSBadRequestException" in message or "FileNotFoundException" in message:
-            return
-        raise
-
-    for status in statuses:
-        item_path = status.getPath()
-        if item_path.getName().startswith(".spark-staging-"):
-            fs.delete(item_path, True)
-            print(f"Deleted Spark staging directory: {item_path.toString()}")
+        items = fs.list_status(target_path)
+        for item_key in items:
+            name = item_key.rstrip("/").split("/")[-1]
+            if name.startswith(".spark-staging-"):
+                full_path = f"s3a://{fs._parse_s3_path(target_path)[0]}/{item_key.lstrip('/')}"
+                fs.delete(item_key, recursive=True)
+                print(f"Deleted Spark staging directory: {item_key}")
+    except Exception as e:
+        print(f"Warning: Failed to cleanup staging dirs at {target_path}: {e}")
 
 
 def delete_path(spark: SparkSession, target_path: str) -> None:
-    fs, path = _get_filesystem(spark, target_path)
+    """Elimina una ruta (archivo o directorio) en R2."""
+    if not target_path.startswith("s3a://"):
+        print(f"Delete skipped: {target_path} is not an S3A path.")
+        return
 
-    if _path_exists(fs, path):
-        fs.delete(path, True)
-        print(f"Deleted existing partition path: {path.toString()}")
+    fs = S3FileSystem()
+    if fs.exists(target_path):
+        fs.delete(target_path, recursive=True)
+        print(f"Deleted existing path: {target_path}")
 
 
 def overwrite_partitioned_dataset(
@@ -60,10 +46,13 @@ def overwrite_partitioned_dataset(
     partition_column: str,
     label: str,
 ) -> None:
+    """Sobrescribe un dataset particionado, limpiando primero las particiones que se van a actualizar."""
     df_to_write = df.where(F.col(partition_column).isNotNull())
+    
+    # Spark Connect friendly collect for partition values
     partition_rows = (
         df_to_write.select(partition_column)
-        .dropDuplicates([partition_column])
+        .distinct()
         .orderBy(partition_column)
         .collect()
     )
