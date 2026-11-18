@@ -50,4 +50,12 @@ def build_spark_session(app_name: str) -> SparkSession:
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", ssl_enabled)
         )
 
+    builder = (
+        builder
+        .config("spark.driver.host", os.getenv("SPARK_DRIVER_HOST", "dagster-daemon"))
+        .config("spark.driver.bindAddress", "0.0.0.0")
+        .config("spark.driver.port", os.getenv("SPARK_DRIVER_PORT", "46841"))
+        .config("spark.driver.blockManager.port", os.getenv("SPARK_DRIVER_BLOCKMANAGER_PORT", "46842"))
+    )
+
     return builder.config("spark.sql.session.timeZone", "UTC").getOrCreate()
