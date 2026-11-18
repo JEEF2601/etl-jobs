@@ -4,36 +4,65 @@ import os
 
 from pyspark.sql import SparkSession
 
+def _env(name: str, default: str = "") -> str:
+    """Lee una variable de entorno y la devuelve sin espacios."""
+    return os.getenv(name, default).strip()
+
 
 def build_spark_session(app_name: str) -> SparkSession:
-    """Crea una SparkSession con soporte para S3A/R2, cluster remoto y paquetes configurables via env vars."""
-    spark_remote = os.getenv("SPARK_REMOTE") or os.getenv("SPARK_REMOTE_URL")
-    spark_master_url = os.getenv("SPARK_MASTER_URL", "").strip()
-    spark_jars = os.getenv("SPARK_JARS", "").strip()
-    spark_packages = os.getenv("SPARK_PACKAGES", "").strip()
+    """Crea una SparkSession (modo clásico) con soporte S3A/R2.
+
+    - Usa SPARK_MASTER_URL para conectarse al cluster standalone; si no está
+      definida, Spark corre en modo local.
+    - Spark Connect ya no se usa: SPARK_REMOTE / SPARK_REMOTE_URL se ignoran.
+    - SPARK_JARS / SPARK_PACKAGES permiten añadir dependencias.
+    """
+    spark_master_url = _env("SPARK_MASTER_URL")
+    spark_jars = _env("SPARK_JARS")
+    spark_packages = _env("SPARK_PACKAGES")
 
     builder = SparkSession.builder.appName(app_name)
-    
-    if spark_remote:
-        builder = builder.remote(spark_remote)
-    elif spark_master_url:
+
+    if spark_master_url:
         builder = builder.master(spark_master_url)
+
+        # Los executors deben poder conectar de vuelta al driver.
+        # El contenedor de Dagster está en varias redes Docker, así que se
+        # escucha en todas las interfaces.
+        builder = builder.config("spark.driver.bindAddress", "0.0.0.0")
+
+        # Opcionales: solo se fijan si se definen. Si no, Spark usa el hostname
+        # del contenedor y puertos libres (permite runs concurrentes).
+        for key, env_name in (
+            ("spark.driver.host", "SPARK_DRIVER_HOST"),
+            ("spark.driver.port", "SPARK_DRIVER_PORT"),
+            ("spark.driver.blockManager.port", "SPARK_DRIVER_BLOCKMANAGER_PORT"),
+        ):
+            value = _env(env_name)
+            if value:
+                builder = builder.config(key, value)
 
     if spark_jars:
         builder = builder.config("spark.jars", spark_jars)
-    elif spark_packages and not spark_remote:
+    elif spark_packages:
         builder = builder.config("spark.jars.packages", spark_packages)
 
-    r2_access_key = os.getenv("R2_ACCESS_KEY_ID", "").strip()
-    r2_secret_key = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
-    r2_endpoint_raw = os.getenv("R2_ENDPOINT", "").strip()
+    # Configurar recursos de los executors
+    builder = builder \
+        .config("spark.executor.memory", "4g") \
+        .config("spark.executor.cores", "2") \
+        .config("spark.executor.memoryOverhead", "1g")
+
+    r2_access_key = _env("R2_ACCESS_KEY_ID")
+    r2_secret_key = _env("R2_SECRET_ACCESS_KEY")
+    r2_endpoint_raw = _env("R2_ENDPOINT")
 
     if r2_access_key and r2_secret_key and r2_endpoint_raw:
         endpoint = r2_endpoint_raw.rstrip("/")
         if "//" not in endpoint:
             endpoint = f"https://{endpoint}"
         ssl_enabled = "true" if endpoint.startswith("https://") else "false"
-        region = os.getenv("R2_REGION", "auto")
+        region = _env("R2_REGION", "auto")
 
         builder = (
             builder
@@ -49,13 +78,5 @@ def build_spark_session(app_name: str) -> SparkSession:
             .config("spark.hadoop.fs.s3a.path.style.access", "true")
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", ssl_enabled)
         )
-
-    builder = (
-        builder
-        .config("spark.driver.host", os.getenv("SPARK_DRIVER_HOST", "dagster-daemon"))
-        .config("spark.driver.bindAddress", "0.0.0.0")
-        .config("spark.driver.port", os.getenv("SPARK_DRIVER_PORT", "46841"))
-        .config("spark.driver.blockManager.port", os.getenv("SPARK_DRIVER_BLOCKMANAGER_PORT", "46842"))
-    )
 
     return builder.config("spark.sql.session.timeZone", "UTC").getOrCreate()
